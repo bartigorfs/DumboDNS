@@ -2,7 +2,9 @@ package main
 
 import (
 	"JumboDNS/database"
+	"bytes"
 	"context"
+	"encoding/gob"
 	"fmt"
 	"github.com/miekg/dns"
 	"github.com/redis/go-redis/v9"
@@ -11,33 +13,87 @@ import (
 )
 
 var RedisClient *redis.Client
-var ctx = context.Background()
+
+func MarshalDNSMsg(msg *dns.Msg) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	err := enc.Encode(msg)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func UnmarshalDNSMsg(data []byte) (*dns.Msg, error) {
+	var msg dns.Msg
+	buf := bytes.NewBuffer(data)
+	dec := gob.NewDecoder(buf)
+	err := dec.Decode(&msg)
+	if err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
+func SaveMsgToRedis(client *redis.Client, key string, msg *dns.Msg) error {
+	ctx := context.Background()
+	data, err := MarshalDNSMsg(msg)
+	if err != nil {
+		return err
+	}
+	err = client.Set(ctx, key, data, time.Second*10).Err()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func GetMsgFromRedis(client *redis.Client, key string) (*dns.Msg, error) {
+	ctx := context.Background()
+	data, err := client.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil, err
+	}
+	return UnmarshalDNSMsg(data)
+}
 
 func resolver(domain string, qtype uint16) []dns.RR {
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(domain), qtype)
-	m.RecursionDesired = true
+	savedMsg, _ := GetMsgFromRedis(RedisClient, domain)
 
-	c := &dns.Client{Timeout: 5 * time.Second}
+	if savedMsg != nil {
+		log.Println("Got cache")
+		return savedMsg.Answer
+	} else {
+		m := new(dns.Msg)
+		m.SetQuestion(dns.Fqdn(domain), qtype)
+		m.RecursionDesired = true
 
-	response, _, err := c.Exchange(m, "8.8.8.8:53")
-	if err != nil {
-		log.Fatalf("[ERROR] : %v\n", err)
-		return nil
+		c := &dns.Client{Timeout: 5 * time.Second}
+
+		response, _, err := c.Exchange(m, "8.8.8.8:53")
+		if err != nil {
+			log.Fatalf("[ERROR] : %v\n", err)
+			return nil
+		}
+
+		if response == nil {
+			log.Fatalf("[ERROR] : no response from server\n")
+			return nil
+		}
+
+		for _, answer := range response.Answer {
+			fmt.Printf("%s\n", answer.String())
+		}
+
+		err = SaveMsgToRedis(RedisClient, domain, response)
+		if err != nil {
+			fmt.Println("Error saving to Redis:", err)
+			return nil
+		}
+		fmt.Println("Successfully saved to Redis")
+
+		return response.Answer
 	}
-
-	if response == nil {
-		log.Fatalf("[ERROR] : no response from server\n")
-		return nil
-	}
-
-	for _, answer := range response.Answer {
-		fmt.Printf("%s\n", answer.String())
-	}
-
-	fmt.Println(response.Answer)
-
-	return response.Answer
 }
 
 type dnsHandler struct{}
@@ -77,10 +133,17 @@ func StartDNSServer() {
 }
 
 func main() {
+	gob.Register(&dns.A{})
+	gob.Register(&dns.CNAME{})
+	gob.Register(&dns.SOA{})
+	gob.Register(&dns.PTR{})
+	gob.Register(&dns.MX{})
+	gob.Register(&dns.TXT{})
+	gob.Register(&dns.SRV{})
+	gob.Register(&dns.NS{})
+	gob.Register(&dns.AAAA{})
+	gob.Register(&dns.OPT{})
+
 	RedisClient = database.CacheClient()
-	err := RedisClient.Set(ctx, "key", "value", time.Second*300).Err()
-	if err != nil {
-		panic(err)
-	}
 	StartDNSServer()
 }
