@@ -1,0 +1,14 @@
+{
+  "Zones": {
+    "local": {
+      "gtsoft.lt": [
+        {
+          "Name": "example.lt",
+          "TTL": "300",
+          "Type": "A",
+          "Server": "172.67.161.24"
+        }
+      ]
+    }
+  }
+}
