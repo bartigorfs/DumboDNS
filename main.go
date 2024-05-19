@@ -2,101 +2,61 @@ package main
 
 import (
 	"JumboDNS/database"
-	"bytes"
+	"JumboDNS/forward"
+	localdns "JumboDNS/local-dns"
 	"context"
 	"encoding/gob"
-	"fmt"
 	"github.com/miekg/dns"
 	"github.com/redis/go-redis/v9"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
-var RedisClient *redis.Client
-
-func MarshalDNSMsg(msg *dns.Msg) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	err := enc.Encode(msg)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func UnmarshalDNSMsg(data []byte) (*dns.Msg, error) {
-	var msg dns.Msg
-	buf := bytes.NewBuffer(data)
-	dec := gob.NewDecoder(buf)
-	err := dec.Decode(&msg)
-	if err != nil {
-		return nil, err
-	}
-	return &msg, nil
-}
-
-func SaveMsgToRedis(client *redis.Client, key string, msg *dns.Msg) error {
-	ctx := context.Background()
-	data, err := MarshalDNSMsg(msg)
-	if err != nil {
-		return err
-	}
-	err = client.Set(ctx, key, data, time.Second*10).Err()
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func GetMsgFromRedis(client *redis.Client, key string) (*dns.Msg, error) {
-	ctx := context.Background()
-	data, err := client.Get(ctx, key).Bytes()
-	if err != nil {
-		return nil, err
-	}
-	return UnmarshalDNSMsg(data)
-}
-
-func resolver(domain string, qtype uint16) []dns.RR {
-	savedMsg, _ := GetMsgFromRedis(RedisClient, domain)
-
-	if savedMsg != nil {
-		log.Println("Got cache")
-		return savedMsg.Answer
-	} else {
-		m := new(dns.Msg)
-		m.SetQuestion(dns.Fqdn(domain), qtype)
-		m.RecursionDesired = true
-
-		c := &dns.Client{Timeout: 5 * time.Second}
-
-		response, _, err := c.Exchange(m, "8.8.8.8:53")
-		if err != nil {
-			log.Fatalf("[ERROR] : %v\n", err)
-			return nil
-		}
-
-		if response == nil {
-			log.Fatalf("[ERROR] : no response from server\n")
-			return nil
-		}
-
-		for _, answer := range response.Answer {
-			fmt.Printf("%s\n", answer.String())
-		}
-
-		err = SaveMsgToRedis(RedisClient, domain, response)
-		if err != nil {
-			fmt.Println("Error saving to Redis:", err)
-			return nil
-		}
-		fmt.Println("Successfully saved to Redis")
-
-		return response.Answer
-	}
-}
+var rcc *redis.Client
 
 type dnsHandler struct{}
+
+func resolver(domain string, qtype uint16) []dns.RR {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(domain), qtype)
+	m.RecursionDesired = true
+
+	var response *dns.Msg
+
+	//savedMsg, _ := common_utils.GetMsgFromRedis(rcc, domain)
+	//
+	//if savedMsg != nil {
+	//	log.Println("Got cache hit for address ", domain)
+	//	response = savedMsg
+	//	return response.Answer
+	//} else {
+	c := &dns.Client{Timeout: 5 * time.Second}
+
+	response = forward.SeekForwarders(c, m)
+
+	if response == nil {
+		log.Printf("[ERROR] : no response from server\n")
+		return nil
+	}
+
+	for _, answer := range response.Answer {
+		log.Printf("%s\n", answer.String())
+	}
+
+	//err := common_utils.SaveMsgToRedis(rcc, domain, response)
+	//if err != nil {
+	//	log.Fatalf("Error saving to Redis: %s", err)
+	//	return nil
+	//}
+	//log.Printf("Saved to cache from %s", domain)
+
+	return response.Answer
+	//}
+	//return nil
+}
 
 func (h *dnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	msg := new(dns.Msg)
@@ -124,11 +84,11 @@ func StartDNSServer() {
 		ReusePort: true,
 	}
 
-	fmt.Printf("JumboDNS started DNS server on %s", server.Addr)
+	log.Printf("DumboDNS started DNS server on %s", server.Addr)
 
 	err := server.ListenAndServe()
 	if err != nil {
-		fmt.Printf("Failed to start server: %s\n", err.Error())
+		log.Fatalf("Failed to start server: %s\n", err.Error())
 	}
 }
 
@@ -144,6 +104,40 @@ func main() {
 	gob.Register(&dns.AAAA{})
 	gob.Register(&dns.OPT{})
 
-	RedisClient = database.CacheClient()
-	StartDNSServer()
+	ctxWc, runCancel := context.WithCancel(context.Background())
+
+	signalWCH := make(chan os.Signal, 1)
+	signal.Notify(signalWCH, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		sig := <-signalWCH
+		log.Printf("Received signal: %v", sig)
+		runCancel()
+	}()
+
+	go func() {
+		rcc = database.RedisCacheClient()
+		forward.LoadForwarders(rcc)
+		StartDNSServer()
+	}()
+
+	go func() {
+		LDNSRecords, err := localdns.LoadDNSRecords("temp.json")
+		if err != nil {
+			log.Fatalf("Error while loading persistent DNS records: %v", err)
+		}
+
+		log.Printf("Local DNS records: %s", LDNSRecords)
+
+		server := dns.Server{Addr: ":54", Net: "udp"}
+		server.Handler = localdns.LocalHandler(LDNSRecords)
+
+		err = server.ListenAndServe()
+		if err != nil {
+			log.Fatalf("Error when starting DNS server: %v", err)
+		}
+	}()
+
+	<-ctxWc.Done()
+	log.Println("Shutting down...")
 }

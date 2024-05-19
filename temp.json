@@ -1,14 +1,16 @@
 {
-  "Zones": {
-    "local": {
-      "gtsoft.lt": [
-        {
-          "Name": "example.lt",
-          "TTL": "300",
-          "Type": "A",
-          "Server": "172.67.161.24"
-        }
-      ]
+  "a_records": [
+    {
+      "name": "pve.local.",
+      "type": "A",
+      "ip": "10.0.0.1"
     }
-  }
+  ],
+  "aaaa_records": [
+    {
+      "name": "pve.local.",
+      "type": "AAAA",
+      "ip": "2001:db8::1"
+    }
+  ]
 }
