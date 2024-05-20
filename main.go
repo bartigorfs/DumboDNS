@@ -9,62 +9,21 @@ import (
 	"github.com/miekg/dns"
 	"github.com/redis/go-redis/v9"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
 )
 
-var rcc *redis.Client
-var LDNSRecords *core.DNSRecords
-
-type dnsHandler struct{}
-
-func (h *dnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.Authoritative = true
-
-	for _, question := range r.Question {
-		name := question.Name
-		switch question.Qtype {
-		case dns.TypeA:
-			for _, record := range LDNSRecords.ARecords {
-				if record.Name == name && record.Type == "A" {
-					m.Answer = append(m.Answer, &dns.A{
-						Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-						A:   net.ParseIP(record.IP),
-					})
-				}
-			}
-		case dns.TypeAAAA:
-			for _, record := range LDNSRecords.AAAARecords {
-				if record.Name == name && record.Type == "AAAA" {
-					m.Answer = append(m.Answer, &dns.AAAA{
-						Hdr:  dns.RR_Header{Name: name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-						AAAA: net.ParseIP(record.IP),
-					})
-				}
-			}
-		}
-	}
-	log.Println(m)
-	err := w.WriteMsg(m)
-	if err != nil {
-		log.Printf("[ERROR] : %v\n", err)
-	}
-}
-
 func StartDNSServer() {
 	var err error
-	LDNSRecords, err = core.LoadDNSRecords("temp.json")
+	core.LocalRecords, err = core.LoadDNSRecords("temp.json")
 	if err != nil {
 		log.Fatalf("Error while loading persistent DNS records: %v", err)
 	}
 
-	log.Printf("Local DNS records: %s", LDNSRecords)
+	log.Printf("Local DNS records: %s", core.LocalRecords)
 
-	handler := new(dnsHandler)
+	handler := new(core.DnsHandler)
 	server := &dns.Server{
 		Addr:      ":53",
 		Net:       "udp",
@@ -105,34 +64,42 @@ func main() {
 	}()
 
 	go func() {
-		rcc = database.RedisCacheClient()
-		StartDNSServer()
+		core.RCC = database.RedisCacheClient()
 
-		go func() {
-			ctx := context.Background()
-			err := rcc.Publish(ctx, "mychannel1", "test").Err()
-			if err != nil {
-				log.Fatalf("Error publishing message: %s", err)
-			} else {
-				log.Printf("Published message to %s: %s", "mychannel1", "test")
-			}
-			database.LocalDNSSub = rcc.Subscribe(ctx, "DynamicRecords")
-			defer func(LocalDNSSub *redis.PubSub) {
+		ctx := context.Background()
+		if core.RCC == nil {
+			log.Fatal("Redis client is not initialized")
+		}
+
+		err := core.RCC.Publish(ctx, "DUMBO_SUB", "test").Err()
+		if err != nil {
+			log.Fatalf("Error publishing message: %s", err)
+		} else {
+			log.Printf("Published message to %s: %s", "DUMBO_SUB", "test")
+		}
+
+		database.LocalDNSSub = core.RCC.Subscribe(ctx, "DUMBO_SUB")
+		defer func(LocalDNSSub *redis.PubSub) {
+			if LocalDNSSub != nil {
 				err := LocalDNSSub.Close()
 				if err != nil {
-
+					log.Printf("Error closing subscription: %s", err)
 				}
-			}(database.LocalDNSSub)
-
-			for {
-				msg, err := database.LocalDNSSub.ReceiveMessage(ctx)
-				if err != nil {
-					log.Fatalf("Error receiving message: %s", err)
-				}
-
-				fmt.Printf("Received message from %s: %s\n", msg.Channel, msg.Payload)
 			}
-		}()
+		}(database.LocalDNSSub)
+
+		for {
+			msg, err := database.LocalDNSSub.ReceiveMessage(ctx)
+			if err != nil {
+				log.Fatalf("Error receiving message: %s", err)
+			}
+
+			fmt.Printf("Received message from %s: %s\n", msg.Channel, msg.Payload)
+		}
+	}()
+
+	go func() {
+		StartDNSServer()
 	}()
 
 	<-ctxWc.Done()
