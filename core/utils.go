@@ -1,7 +1,7 @@
 package core
 
 import (
-	"encoding/json"
+	"github.com/bytedance/sonic"
 	"io/ioutil"
 	"os"
 )
@@ -24,7 +24,7 @@ func LoadDNSRecords(filename string) (*DNSRecords, error) {
 	}
 
 	var dnsRecords DNSRecords
-	err = json.Unmarshal(data, &dnsRecords)
+	err = sonic.Unmarshal(data, &dnsRecords)
 	if err != nil {
 		return nil, err
 	}

@@ -4,8 +4,6 @@ import (
 	core "JumboDNS/core"
 	"JumboDNS/database"
 	"context"
-	"encoding/gob"
-	"fmt"
 	"github.com/miekg/dns"
 	"github.com/redis/go-redis/v9"
 	"log"
@@ -13,6 +11,15 @@ import (
 	"os/signal"
 	"syscall"
 )
+
+func CloseRedisSub(LocalDNSSub *redis.PubSub) {
+	if LocalDNSSub != nil {
+		err := LocalDNSSub.Close()
+		if err != nil {
+			log.Printf("Error closing subscription: %s", err)
+		}
+	}
+}
 
 func StartDNSServer() {
 	var err error
@@ -41,17 +48,6 @@ func StartDNSServer() {
 }
 
 func main() {
-	gob.Register(&dns.A{})
-	gob.Register(&dns.CNAME{})
-	gob.Register(&dns.SOA{})
-	gob.Register(&dns.PTR{})
-	gob.Register(&dns.MX{})
-	gob.Register(&dns.TXT{})
-	gob.Register(&dns.SRV{})
-	gob.Register(&dns.NS{})
-	gob.Register(&dns.AAAA{})
-	gob.Register(&dns.OPT{})
-
 	ctxWc, runCancel := context.WithCancel(context.Background())
 
 	signalWCH := make(chan os.Signal, 1)
@@ -65,37 +61,15 @@ func main() {
 
 	go func() {
 		core.RCC = database.RedisCacheClient()
-
 		ctx := context.Background()
+
 		if core.RCC == nil {
 			log.Fatal("Redis client is not initialized")
 		}
 
-		err := core.RCC.Publish(ctx, "DUMBO_SUB", "test").Err()
-		if err != nil {
-			log.Fatalf("Error publishing message: %s", err)
-		} else {
-			log.Printf("Published message to %s: %s", "DUMBO_SUB", "test")
-		}
-
 		database.LocalDNSSub = core.RCC.Subscribe(ctx, "DUMBO_SUB")
-		defer func(LocalDNSSub *redis.PubSub) {
-			if LocalDNSSub != nil {
-				err := LocalDNSSub.Close()
-				if err != nil {
-					log.Printf("Error closing subscription: %s", err)
-				}
-			}
-		}(database.LocalDNSSub)
-
-		for {
-			msg, err := database.LocalDNSSub.ReceiveMessage(ctx)
-			if err != nil {
-				log.Fatalf("Error receiving message: %s", err)
-			}
-
-			fmt.Printf("Received message from %s: %s\n", msg.Channel, msg.Payload)
-		}
+		defer CloseRedisSub(database.LocalDNSSub)
+		core.HandleRedisSubUpdates(ctx)
 	}()
 
 	go func() {

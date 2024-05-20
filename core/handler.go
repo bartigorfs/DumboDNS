@@ -24,7 +24,14 @@ func (h *DnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 				}
 			}
 		case dns.TypeCNAME:
-
+			for _, record := range LocalRecords.CNAMERecord {
+				if record.Name == name && record.Type == "CNAME" {
+					m.Answer = append(m.Answer, &dns.CNAME{
+						Hdr:    dns.RR_Header{Name: name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 3600},
+						Target: record.Target,
+					})
+				}
+			}
 		case dns.TypeAAAA:
 			for _, record := range LocalRecords.AAAARecords {
 				if record.Name == name && record.Type == "AAAA" {
@@ -36,7 +43,9 @@ func (h *DnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			}
 		}
 	}
+
 	log.Println(m)
+
 	err := w.WriteMsg(m)
 	if err != nil {
 		log.Printf("[ERROR] : %v\n", err)

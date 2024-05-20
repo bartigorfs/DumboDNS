@@ -12,5 +12,12 @@
       "type": "AAAA",
       "ip": "2001:db8::1"
     }
+  ],
+  "cname_records": [
+    {
+      "name": "oppa.local.",
+      "type": "CNAME",
+      "target": "pve.local."
+    }
   ]
 }
