@@ -1,4 +1,4 @@
-package local_dns
+package core
 
 import (
 	"encoding/json"
